@@ -1,0 +1,25 @@
+# Special folders
+
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Environments
+.env
+.venv/
+venv/
+
+# Packages
+*.egg-info/
+dist/
+build/
+
+# IDE / Tools
+.vscode/
+.idea/
+
+# Logs / misc
+*.log
+.DS_Store
