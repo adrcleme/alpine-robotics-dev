@@ -7,7 +7,6 @@ import pandas as pd
 import os
 import time
 import datetime
-import numpy as np
 
 # port on the host where the mocap device published the data
 desktop_ip = '192.168.1.18' #192.168.1.13
@@ -46,54 +45,22 @@ class MocapClient:
         self.ip = ip
         self.port = port
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        # Set socket receive buffer size to limit buffering (helps prevent backlog)
-        self.sock.setsockopt(socket.SOL_SOCKET, socket.SO_RCVBUF, 65536)  # 64KB buffer
         self.sock.bind((ip,self.port))
         # data buffers
         self.x_buffer = []
         self.y_buffer = []
         self.z_buffer = []
-        self.q_x_buffer = []
-        self.q_y_buffer = []
-        self.q_z_buffer = []
-        self.q_w_buffer = []
-        self.heading_buffer = []  # Heading (yaw) in radians
+        self.r_buffer = []
+        self.p_buffer = []
+        self.q_buffer = []
         self.vxy__buffer = []
         self.timestamps = []
         self.raw_messages = []
         self.lock = asyncio.Lock()
         print(f"UDP socket bound to {self.ip}:{self.port}, listening for mocap data...")
     
-    def flush_old_packets(self, flush_duration=0.1):
-        """
-        Flush old buffered packets by reading and discarding them for a short period.
-        This prevents processing stale data when the client first starts.
-        """
-        print(f"Flushing old packets for {flush_duration} seconds...")
-        self.sock.settimeout(flush_duration)
-        flush_start = time.time()
-        flushed_count = 0
-        
-        while time.time() - flush_start < flush_duration:
-            try:
-                data, addr = self.sock.recvfrom(1024)
-                flushed_count += 1
-            except socket.timeout:
-                break
-            except Exception:
-                break
-        
-        self.sock.settimeout(None)  # Reset to blocking mode
-        if flushed_count > 0:
-            print(f"Flushed {flushed_count} old packets")
-        else:
-            print("No old packets to flush")
-    
     def listen(self, max_messages=None):
         """Listens for mocap data. After skipping the first message, collects messages indefinitely (or up to max_messages if specified)."""
-        # Flush old packets before starting to collect data
-        self.flush_old_packets(flush_duration=0.2)
-        
         first_message = True
         message_count = 0
         try:
@@ -120,35 +87,24 @@ class MocapClient:
         finally:
             self.sock.close()
     
-    def quaternion_to_heading(self, q_x, q_y, q_z, q_w):
-        """
-        Converts quaternion to heading (yaw angle in radians).
-        Formula: heading = atan2(2*(w*z + x*y), 1 - 2*(y^2 + z^2))
-        """
-        heading = np.arctan2(
-            2 * (q_w * q_z + q_x * q_y),
-            1 - 2 * (q_y**2 + q_z**2)
-        )
-        return heading
-    
-    def get_last_heading(self):
-        """Returns the last heading in radians."""
-        if len(self.heading_buffer) > 0:
-            return self.heading_buffer[-1]
+    def get_last_velocity(self):
+        """Returns the last velocity."""
+        if len(self.vxy__buffer) > 0:
+            # makes sure there is no access to the buffer while reading , with a lock
+            #with self.lock:
+            v = self.vxy__buffer[-1]
+            return v
         else:
             return 0.0
     
     def get_last_position(self):
         """Returns the last position."""
-        if len(self.x_buffer) > 0 and len(self.y_buffer) > 0:
-            return self.x_buffer[-1], self.y_buffer[-1]
-        else:
-            return 0.0, 0.0
+        return self.x_buffer[-1], self.y_buffer[-1]
     
-    def get_last_velocity(self):
-        """Returns the last velocity."""
-        if len(self.vxy__buffer) > 0:
-            return self.vxy__buffer[-1]
+    def get_last_heading(self):
+        """Returns the last heading/yaw in radians."""
+        if len(self.q_buffer) > 0:
+            return self.q_buffer[-1]
         else:
             return 0.0
     
@@ -156,6 +112,20 @@ class MocapClient:
         """Returns the last z position."""
         if len(self.z_buffer) > 0:
             return self.z_buffer[-1]
+        else:
+            return 0.0
+    
+    def get_last_roll(self):
+        """Returns the last roll in radians."""
+        if len(self.r_buffer) > 0:
+            return self.r_buffer[-1]
+        else:
+            return 0.0
+    
+    def get_last_pitch(self):
+        """Returns the last pitch in radians."""
+        if len(self.p_buffer) > 0:
+            return self.p_buffer[-1]
         else:
             return 0.0
     
@@ -171,11 +141,9 @@ class MocapClient:
             'x': self.x_buffer,
             'y': self.y_buffer,
             'z': self.z_buffer,
-            'q_x': self.q_x_buffer,
-            'q_y': self.q_y_buffer,
-            'q_z': self.q_z_buffer,
-            'q_w': self.q_w_buffer,
-            'heading': self.heading_buffer,  # Heading in radians
+            'roll': self.r_buffer,
+            'pitch': self.p_buffer,
+            'yaw': self.q_buffer,
             'raw_message': self.raw_messages
         }
         print(data_dict)
@@ -204,27 +172,20 @@ class MocapClient:
             x = float(split_msg[1])
             y = float(split_msg[2])
             z = float(split_msg[3])
-            q_x = float(split_msg[4])
-            q_y = float(split_msg[5])
-            q_z = float(split_msg[6])
-            q_w = float(split_msg[7])
+            r = float(split_msg[4])
+            p = float(split_msg[5])
+            q = float(split_msg[6])
             self.x_buffer.append(x)
             self.y_buffer.append(y)
             self.z_buffer.append(z)
-            self.q_x_buffer.append(q_x)
-            self.q_y_buffer.append(q_y)
-            self.q_z_buffer.append(q_z)
-            self.q_w_buffer.append(q_w)
-            
-            # Convert quaternion to heading in real-time
-            heading = self.quaternion_to_heading(q_x, q_y, q_z, q_w)
-            self.heading_buffer.append(heading)
-            
+            self.r_buffer.append(r)
+            self.p_buffer.append(p)
+            self.q_buffer.append(q)
             self.raw_messages.append(msg)
             self.timestamps.append(datetime.datetime.now())
             if len(self.x_buffer) > 2:
                 dt = (self.timestamps[-1] - self.timestamps[-2]).total_seconds()
-                #print(f"dt mocap : {dt}, x : {x}, y : {y}, heading : {heading:.4f} rad")
+                #print(f"dt mocap : {dt}, x : {x}, y : {y} ")
         except (ValueError, IndexError) as e:
             print(f"Error parsing message: {msg}. Error: {e}")
 

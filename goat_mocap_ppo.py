@@ -77,6 +77,7 @@ data_log = []
 mocap_velocity = 0.0
 mocap_x = 0.0
 mocap_y = 0.0
+mocap_z = 0.0
 failure_mode = 0
 failure_mode_flag = 0
 SAVE_DATA = True
@@ -281,6 +282,7 @@ async def ppo_control_loop():
     global mocap_velocity
     global mocap_x
     global mocap_y
+    global mocap_z
     global left_wheel_velocity
     global right_wheel_velocity
     global origin_xy
@@ -317,16 +319,14 @@ async def ppo_control_loop():
             mocap_velocity = mocap_client.get_last_velocity()
             mocap_x, mocap_y = mocap_client.get_last_position()
             mocap_z = mocap_client.get_last_z()
-            mocap_roll = mocap_client.get_last_roll()
-            mocap_pitch = mocap_client.get_last_pitch()
             
-            # Extract heading from mocap quaternion field
+            # Extract heading from mocap (already converted from quaternion)
             try:
-                mocap_yaw_raw = mocap_client.get_last_heading()
+                mocap_heading = mocap_client.get_last_heading()
                 # Wrap heading to [-pi, pi] to ensure consistent range for error computation
-                current_heading_rad = wrap_to_pi(mocap_yaw_raw)
+                current_heading_rad = wrap_to_pi(mocap_heading)
             except Exception:
-                mocap_yaw_raw = 0.0
+                mocap_heading = 0.0
                 current_heading_rad = 0.0
                 if VERBOSE:
                     print("[PPO Control] Could not extract heading from mocap data")
@@ -388,7 +388,7 @@ async def ppo_control_loop():
             ] + sensor_values + ps4_values + [
                 # All mocap data with mocap_ prefix
                 str(mocap_velocity), str(mocap_x), str(mocap_y), str(mocap_z),
-                str(mocap_roll), str(mocap_pitch), str(mocap_yaw_raw),
+                str(mocap_heading),
                 forward_vel_cmd, steering_vel_cmd,
                 left_wheel_velocity, right_wheel_velocity,
                 1.0 if PPO_CONTROL_ACTIVE else 0.0,
@@ -435,7 +435,7 @@ async def save_to_csv():
                       ] + button_labels + [
                           # All mocap data received by mocap_client
                           "mocap_velocity", "mocap_x", "mocap_y", "mocap_z",
-                          "mocap_roll", "mocap_pitch", "mocap_yaw_raw",
+                          "mocap_heading",
                           "forward_vel_cmd", "steering_vel_cmd",
                           "left_wheel_vel", "right_wheel_vel",
                           "ppo_control_active",
@@ -485,7 +485,7 @@ async def cleanup():
                   ] + button_labels + [
                       # All mocap data received by mocap_client
                       "mocap_velocity", "mocap_x", "mocap_y", "mocap_z",
-                      "mocap_roll", "mocap_pitch", "mocap_yaw_raw",
+                      "mocap_heading",
                       "forward_vel_cmd", "steering_vel_cmd",
                       "left_wheel_vel", "right_wheel_vel",
                       "ppo_control_active",
