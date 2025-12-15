@@ -8,6 +8,7 @@ import os
 import time
 import datetime
 import numpy as np
+import threading
 
 # port on the host where the mocap device published the data
 desktop_ip = '192.168.1.18' #192.168.1.13
@@ -61,7 +62,7 @@ class MocapClient:
         self.vxy__buffer = []
         self.timestamps = []
         self.raw_messages = []
-        self.lock = asyncio.Lock()
+        self.lock = threading.Lock()  # Thread lock for buffer access
         print(f"UDP socket bound to {self.ip}:{self.port}, listening for mocap data...")
     
     def flush_old_packets(self, flush_duration=0.1):
@@ -90,29 +91,48 @@ class MocapClient:
             print("No old packets to flush")
     
     def listen(self, max_messages=None):
-        """Listens for mocap data. After skipping the first message, collects messages indefinitely (or up to max_messages if specified)."""
+        """
+        Listens for mocap data at high frequency. Drains the socket buffer to prevent lag.
+        After skipping the first message, collects messages indefinitely (or up to max_messages if specified).
+        """
         # Flush old packets before starting to collect data
         self.flush_old_packets(flush_duration=0.2)
+        
+        # Make socket non-blocking to read all available packets
+        self.sock.setblocking(False)
         
         first_message = True
         message_count = 0
         try:
             while True:
-                data, addr = self.sock.recvfrom(1024)
-                # Skip the first message (usually a "hello world" or initialization message)
-                if first_message:
-                    print(f"Skipping first message: {data.decode()}")
-                    first_message = False
-                    continue
-                #print(f"Received {data} from {addr}")
-                self.extract_data(data.decode())
-                message_count += 1
-                if max_messages is not None and message_count >= max_messages:
-                    print(f"Collected {message_count} messages. Stopping...")
-                    break
+                packets_read = 0
+                # Read all available packets in the buffer (drain the buffer)
+                while True:
+                    try:
+                        data, addr = self.sock.recvfrom(1024)
+                        # Skip the first message (usually a "hello world" or initialization message)
+                        if first_message:
+                            print(f"Skipping first message: {data.decode()}")
+                            first_message = False
+                            continue
+                        #print(f"Received {data} from {addr}")
+                        self.extract_data(data.decode())
+                        message_count += 1
+                        packets_read += 1
+                        if max_messages is not None and message_count >= max_messages:
+                            print(f"Collected {message_count} messages. Stopping...")
+                            return
+                    except (BlockingIOError, socket.error, OSError):
+                        # No more packets available (would block), break inner loop
+                        break
+                
+                # Only sleep if no packets were read (to avoid tight loop when no data)
+                if packets_read == 0:
+                    time.sleep(0.001)  # Small sleep to avoid CPU spinning (1ms)
+                # If packets were read, continue immediately to process next batch
+                
                 if max_messages is not None and message_count % 10 == 0:
                     print(f"Collected {message_count}/{max_messages} messages...")
-                time.sleep(self.dt)
         except KeyboardInterrupt:
             print("Closing the connection with the mocap device.")
         except Exception as e:
@@ -132,32 +152,36 @@ class MocapClient:
         return heading
     
     def get_last_heading(self):
-        """Returns the last heading in radians."""
-        if len(self.heading_buffer) > 0:
-            return self.heading_buffer[-1]
-        else:
-            return 0.0
+        """Returns the last heading in radians (thread-safe)."""
+        with self.lock:
+            if len(self.heading_buffer) > 0:
+                return self.heading_buffer[-1]
+            else:
+                return 0.0
     
     def get_last_position(self):
-        """Returns the last position."""
-        if len(self.x_buffer) > 0 and len(self.y_buffer) > 0:
-            return self.x_buffer[-1], self.y_buffer[-1]
-        else:
-            return 0.0, 0.0
+        """Returns the last position (thread-safe)."""
+        with self.lock:
+            if len(self.x_buffer) > 0 and len(self.y_buffer) > 0:
+                return self.x_buffer[-1], self.y_buffer[-1]
+            else:
+                return 0.0, 0.0
     
     def get_last_velocity(self):
-        """Returns the last velocity."""
-        if len(self.vxy__buffer) > 0:
-            return self.vxy__buffer[-1]
-        else:
-            return 0.0
+        """Returns the last velocity (thread-safe)."""
+        with self.lock:
+            if len(self.vxy__buffer) > 0:
+                return self.vxy__buffer[-1]
+            else:
+                return 0.0
     
     def get_last_z(self):
-        """Returns the last z position."""
-        if len(self.z_buffer) > 0:
-            return self.z_buffer[-1]
-        else:
-            return 0.0
+        """Returns the last z position (thread-safe)."""
+        with self.lock:
+            if len(self.z_buffer) > 0:
+                return self.z_buffer[-1]
+            else:
+                return 0.0
     
     def save_data(self, filename=None):
         """Saves all collected data to a CSV file."""
@@ -192,7 +216,7 @@ class MocapClient:
         return filename
     
     def extract_data(self, msg):
-        """Extracts the data from the message."""
+        """Extracts the data from the message (thread-safe)."""
         split_msg = msg.split(',')
         # Validate message format before extracting data
         if len(split_msg) < 7:
@@ -208,23 +232,27 @@ class MocapClient:
             q_y = float(split_msg[5])
             q_z = float(split_msg[6])
             q_w = float(split_msg[7])
-            self.x_buffer.append(x)
-            self.y_buffer.append(y)
-            self.z_buffer.append(z)
-            self.q_x_buffer.append(q_x)
-            self.q_y_buffer.append(q_y)
-            self.q_z_buffer.append(q_z)
-            self.q_w_buffer.append(q_w)
             
             # Convert quaternion to heading in real-time
             heading = self.quaternion_to_heading(q_x, q_y, q_z, q_w)
-            self.heading_buffer.append(heading)
             
-            self.raw_messages.append(msg)
-            self.timestamps.append(datetime.datetime.now())
-            if len(self.x_buffer) > 2:
-                dt = (self.timestamps[-1] - self.timestamps[-2]).total_seconds()
-                #print(f"dt mocap : {dt}, x : {x}, y : {y}, heading : {heading:.4f} rad")
+            # Update buffers with thread lock
+            with self.lock:
+                self.x_buffer.append(x)
+                self.y_buffer.append(y)
+                self.z_buffer.append(z)
+                self.q_x_buffer.append(q_x)
+                self.q_y_buffer.append(q_y)
+                self.q_z_buffer.append(q_z)
+                self.q_w_buffer.append(q_w)
+                self.heading_buffer.append(heading)
+                self.raw_messages.append(msg)
+                self.timestamps.append(datetime.datetime.now())
+                
+                # Check buffer length and calculate dt while holding the lock
+                if len(self.x_buffer) > 2:
+                    dt = (self.timestamps[-1] - self.timestamps[-2]).total_seconds()
+                    #print(f"dt mocap : {dt}, x : {x}, y : {y}, heading : {heading:.4f} rad")
         except (ValueError, IndexError) as e:
             print(f"Error parsing message: {msg}. Error: {e}")
 

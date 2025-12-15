@@ -42,7 +42,7 @@ MOCAP_IP = '192.168.1.18'
 PORT = 9091
 PREDICTION_DT = 0.03
 TRACK_WIDTH = 0.35
-DISTANCE_TARGET_REACHED = 0.5  # meters
+DISTANCE_TARGET_REACHED = 1  # meters
 
 # Model and waypoint configuration
 RL_MODEL_PATH = os.getenv(
@@ -72,6 +72,11 @@ forward_vel_cmd = 0.0
 steering_vel_cmd = 0.0
 left_wheel_velocity = 0.0
 right_wheel_velocity = 0.0
+# Raw NN output values (before clipping)
+nn_v_left = 0.0
+nn_v_right = 0.0
+nn_v_linear = 0.0
+nn_v_angular = 0.0
 ps4_data_log = []
 data_log = []
 mocap_velocity = 0.0
@@ -84,10 +89,8 @@ SAVE_DATA = True
 
 # Waypoint management
 waypoint_list = []
-waypoint_list_xy = []  # Waypoints in mocap coordinates (x, y)
+waypoint_list_xy = []  # Waypoints in mocap coordinates (x, y) - absolute coordinates
 current_waypoint_idx = 0
-origin_xy = None  # Origin position for relative coordinates
-relative_waypoints = []  # Waypoints relative to origin
 run_folder = None  # Folder for saving data files
 
 
@@ -285,9 +288,11 @@ async def ppo_control_loop():
     global mocap_z
     global left_wheel_velocity
     global right_wheel_velocity
-    global origin_xy
+    global nn_v_left
+    global nn_v_right
+    global nn_v_linear
+    global nn_v_angular
     global current_waypoint_idx
-    global relative_waypoints
     global waypoint_list_xy
     global mocap_client
     global ppo_controller
@@ -331,44 +336,34 @@ async def ppo_control_loop():
                 if VERBOSE:
                     print("[PPO Control] Could not extract heading from mocap data")
 
-            # Initialize origin on first valid position
-            if origin_xy is None and not (math.isnan(mocap_x) or math.isnan(mocap_y)):
-                origin_xy = (mocap_x, mocap_y)
-                # Convert waypoints to relative coordinates
-                if waypoint_list_xy:
-                    relative_waypoints = [(wx - origin_xy[0], wy - origin_xy[1]) for wx, wy in waypoint_list_xy]
-                    if VERBOSE:
-                        print(f"[PPO Control] Origin locked at {origin_xy}")
-                        print(f"[PPO Control] {len(relative_waypoints)} waypoints loaded")
-
-            # Skip if no waypoints or origin not set
-            if not relative_waypoints or origin_xy is None:
+            # Skip if no waypoints loaded
+            if not waypoint_list_xy:
                 await asyncio.sleep(PREDICTION_DT)
                 continue
 
-            relative_current = (mocap_x - origin_xy[0], mocap_y - origin_xy[1])    # Compute relative position
-
-            target_relative = relative_waypoints[current_waypoint_idx]             # Get current target waypoint   
+            # Use absolute mocap coordinates directly
+            current_position = (mocap_x, mocap_y)
+            target_waypoint = waypoint_list_xy[current_waypoint_idx]
             
             # Update waypoint index if reached
-            distance_to_target = compute_distance(relative_current, target_relative)
+            distance_to_target = compute_distance(current_position, target_waypoint)
             if distance_to_target < DISTANCE_TARGET_REACHED:
-                current_waypoint_idx = (current_waypoint_idx + 1) % len(relative_waypoints)
-                target_relative = relative_waypoints[current_waypoint_idx]
+                current_waypoint_idx = (current_waypoint_idx + 1) % len(waypoint_list_xy)
+                target_waypoint = waypoint_list_xy[current_waypoint_idx]
                 if VERBOSE:
-                    print(f"[PPO Control] Advancing to waypoint {current_waypoint_idx}")
-                distance_to_target = compute_distance(relative_current, target_relative)
+                    print(f"[PPO Control] Advancing to waypoint {current_waypoint_idx} at ({target_waypoint[0]:.2f}, {target_waypoint[1]:.2f})")
+                distance_to_target = compute_distance(current_position, target_waypoint)
 
-            # Compute heading error
-            heading_error_rad = compute_heading_error(relative_current, target_relative, current_heading_rad)
+            # Compute heading error using absolute coordinates
+            heading_error_rad = compute_heading_error(current_position, target_waypoint, current_heading_rad)
 
-            # Update PPO controller buffers
+            # Update PPO controller buffers with absolute coordinates
             if ppo_controller is not None:
                 ppo_controller.update_buffers(
-                    relative_current,
+                    current_position,
                     heading_error_rad,
                     distance_to_target,
-                    target_relative
+                    target_waypoint
                 )
 
             # Compute PPO command if control is active
@@ -376,11 +371,22 @@ async def ppo_control_loop():
                 action = ppo_controller.compute_command()
                 if action is not None:
                     v_left, v_right, v_linear, v_angular = action
+                    # Store raw NN outputs before clipping
+                    nn_v_left = v_left
+                    nn_v_right = v_right
+                    nn_v_linear = v_linear
+                    nn_v_angular = v_angular
                     # Clip wheel velocities to [-1, 1] range
                     left_wheel_velocity = np.clip(v_left, -1.0, 1.0)
                     right_wheel_velocity = np.clip(v_right, -1.0, 1.0)
                     if VERBOSE:
                         print(f"[PPO Control] Command: left={left_wheel_velocity:.3f}, right={right_wheel_velocity:.3f}")
+            else:
+                # Reset NN outputs when PPO is not active
+                nn_v_left = 0.0
+                nn_v_right = 0.0
+                nn_v_linear = 0.0
+                nn_v_angular = 0.0
 
             # Log data
             data_log.append([
@@ -391,10 +397,11 @@ async def ppo_control_loop():
                 str(mocap_heading),
                 forward_vel_cmd, steering_vel_cmd,
                 left_wheel_velocity, right_wheel_velocity,
+                # Raw NN outputs (before clipping)
+                nn_v_left, nn_v_right, nn_v_linear, nn_v_angular,
                 1.0 if PPO_CONTROL_ACTIVE else 0.0,
                 heading_error_rad, current_heading_rad, distance_to_target,
-                relative_current[0], relative_current[1],
-                target_relative[0], target_relative[1],
+                target_waypoint[0], target_waypoint[1],
                 current_waypoint_idx
             ])
 
@@ -438,10 +445,11 @@ async def save_to_csv():
                           "mocap_heading",
                           "forward_vel_cmd", "steering_vel_cmd",
                           "left_wheel_vel", "right_wheel_vel",
+                          # Raw NN outputs (before clipping)
+                          "nn_v_left", "nn_v_right", "nn_v_linear", "nn_v_angular",
                           "ppo_control_active",
                           "heading_error_rad", "current_heading_rad", "distance_to_target",
-                          "relative_x", "relative_y",
-                          "target_relative_x", "target_relative_y",
+                          "target_x", "target_y",
                           "current_waypoint_idx"
                       ]
             df = pd.DataFrame(data_log, columns=header)
@@ -488,10 +496,11 @@ async def cleanup():
                       "mocap_heading",
                       "forward_vel_cmd", "steering_vel_cmd",
                       "left_wheel_vel", "right_wheel_vel",
+                      # Raw NN outputs (before clipping)
+                      "nn_v_left", "nn_v_right", "nn_v_linear", "nn_v_angular",
                       "ppo_control_active",
                       "heading_error_rad", "current_heading_rad", "distance_to_target",
-                      "relative_x", "relative_y",
-                      "target_relative_x", "target_relative_y",
+                      "target_x", "target_y",
                       "current_waypoint_idx"
                   ]
         df = pd.DataFrame(data_log, columns=header)
