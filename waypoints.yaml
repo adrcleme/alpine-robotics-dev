@@ -1,5 +1,5 @@
 terrains:
   default:
     waypoints:
-      - [-2, -2.5]
-      - [2, 2.5]
+      - [1, -2]
+      - [-1, 2]

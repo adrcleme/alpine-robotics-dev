@@ -36,9 +36,9 @@ DEBUG_SCREEN_ENABLED = args.debug_screen
 
 # Global variables
 # UDP Configuration
-ESP32_IP = "192.168.1.17"  # Replace with your ESP32's IP, when connected to the SycamoreNet
+ESP32_IP = "192.168.1.10"  # Replace with your ESP32's IP, when connected to the SycamoreNet 17
 ESP32_PORT = 5005
-MOCAP_IP = '192.168.1.18'
+MOCAP_IP = '192.168.1.5' # .18
 PORT = 9091
 PREDICTION_DT = 0.03
 TRACK_WIDTH = 0.35
@@ -91,6 +91,7 @@ SAVE_DATA = True
 waypoint_list = []
 waypoint_list_xy = []  # Waypoints in mocap coordinates (x, y) - absolute coordinates
 current_waypoint_idx = 0
+all_waypoints_reached = False  # Flag to track if all waypoints have been completed
 run_folder = None  # Folder for saving data files
 
 
@@ -121,6 +122,8 @@ async def terminal_menu_loop():
     global left_wheel_velocity
     global right_wheel_velocity
     global shutdown_flag
+    global all_waypoints_reached
+    global current_waypoint_idx
     
     # Start input reader thread
     input_thread = threading.Thread(target=input_reader_thread, daemon=True)
@@ -131,6 +134,7 @@ async def terminal_menu_loop():
     
     def print_menu():
         """Print the control menu."""
+        global all_waypoints_reached, current_waypoint_idx, waypoint_list_xy
         print("\n" + "="*50)
         print("=== GOAT Control Menu ===")
         print("="*50)
@@ -138,6 +142,11 @@ async def terminal_menu_loop():
         print(f"  PPO Control: {'ON' if PPO_CONTROL_ACTIVE else 'OFF'}")
         print(f"  Failure Mode: {failure_mode_flag}")
         print(f"  Wheel Velocities: L={left_wheel_velocity:.3f}, R={right_wheel_velocity:.3f}")
+        if waypoint_list_xy:
+            waypoint_status = f"Waypoint {current_waypoint_idx + 1}/{len(waypoint_list_xy)}"
+            if all_waypoints_reached:
+                waypoint_status += " (ALL REACHED - STOPPED)"
+            print(f"  {waypoint_status}")
         print("\nCommands:")
         print("  1 / ppo    - Toggle PPO control")
         print("  2 / f1     - Set failure mode 1")
@@ -163,6 +172,9 @@ async def terminal_menu_loop():
                     print(f"\n[Terminal] PPO control toggled {mode}")
                     if PPO_CONTROL_ACTIVE:
                         failure_mode_flag = 9  # Reset failure mode when PPO is active
+                        all_waypoints_reached = False  # Reset waypoint completion flag
+                        current_waypoint_idx = 0  # Reset to first waypoint
+                        print(f"[Terminal] Waypoint mission reset to start")
                     print_menu()
                     
                 elif command in ['2', 'f1', 'failure1']:
@@ -294,6 +306,9 @@ async def ppo_control_loop():
     global nn_v_angular
     global current_waypoint_idx
     global waypoint_list_xy
+    global all_waypoints_reached
+    global PPO_CONTROL_ACTIVE
+    global failure_mode_flag
     global mocap_client
     global ppo_controller
     global shutdown_flag
@@ -348,11 +363,23 @@ async def ppo_control_loop():
             # Update waypoint index if reached
             distance_to_target = compute_distance(current_position, target_waypoint)
             if distance_to_target < DISTANCE_TARGET_REACHED:
-                current_waypoint_idx = (current_waypoint_idx + 1) % len(waypoint_list_xy)
-                target_waypoint = waypoint_list_xy[current_waypoint_idx]
-                if VERBOSE:
-                    print(f"[PPO Control] Advancing to waypoint {current_waypoint_idx} at ({target_waypoint[0]:.2f}, {target_waypoint[1]:.2f})")
-                distance_to_target = compute_distance(current_position, target_waypoint)
+                # Check if this is the last waypoint
+                if current_waypoint_idx == len(waypoint_list_xy) - 1:
+                    # All waypoints reached - stop the robot (same as pressing '4')
+                    all_waypoints_reached = True
+                    PPO_CONTROL_ACTIVE = False
+                    left_wheel_velocity = 0.0
+                    right_wheel_velocity = 0.0
+                    failure_mode_flag = 0
+                    if VERBOSE:
+                        print(f"[PPO Control] All waypoints reached! Stopping robot.")
+                else:
+                    # Advance to next waypoint
+                    current_waypoint_idx += 1
+                    target_waypoint = waypoint_list_xy[current_waypoint_idx]
+                    if VERBOSE:
+                        print(f"[PPO Control] Advancing to waypoint {current_waypoint_idx} at ({target_waypoint[0]:.2f}, {target_waypoint[1]:.2f})")
+                    distance_to_target = compute_distance(current_position, target_waypoint)
 
             # Compute heading error using absolute coordinates
             heading_error_rad = compute_heading_error(current_position, target_waypoint, current_heading_rad)
@@ -366,8 +393,8 @@ async def ppo_control_loop():
                     target_waypoint
                 )
 
-            # Compute PPO command if control is active
-            if PPO_CONTROL_ACTIVE and ppo_controller is not None:
+            # Compute PPO command if control is active and waypoints not all reached
+            if PPO_CONTROL_ACTIVE and ppo_controller is not None and not all_waypoints_reached:
                 action = ppo_controller.compute_command()
                 if action is not None:
                     v_left, v_right, v_linear, v_angular = action

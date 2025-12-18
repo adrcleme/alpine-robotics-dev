@@ -11,7 +11,7 @@ import numpy as np
 import threading
 
 # port on the host where the mocap device published the data
-desktop_ip = '192.168.1.18' #192.168.1.13
+desktop_ip = '192.168.1.5' #192.168.1.18
 PORT = 9091
 
 def send_ping():
