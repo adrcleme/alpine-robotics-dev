@@ -55,7 +55,7 @@ class PPOController:
         
         # Velocity limits
         self.v_max = 0.5
-        self.omega_max = 2.7 #3.0
+        self.omega_max = 3 #3.0
 
         self._load_model()
 

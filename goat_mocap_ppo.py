@@ -40,9 +40,9 @@ ESP32_IP = "192.168.1.10"  # Replace with your ESP32's IP, when connected to the
 ESP32_PORT = 5005
 MOCAP_IP = '192.168.1.5' # .18
 PORT = 9091
-PREDICTION_DT = 0.03
+PREDICTION_DT = 0.045
 TRACK_WIDTH = 0.35
-DISTANCE_TARGET_REACHED = 1  # meters
+DISTANCE_TARGET_REACHED = 0.75  # meters
 
 # Model and waypoint configuration
 RL_MODEL_PATH = os.getenv(
